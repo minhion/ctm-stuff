@@ -111,6 +111,32 @@ client.on('messageCreate', async (message) => {
             });
         });
     }
+
+    // Command to get agents from a Control-M server
+    if (message.content.startsWith('!get_agents')) {
+        const args = message.content.split(' ');
+        const server = args[1]; // Server name, e.g., 'barbatos'
+
+        const agentsCommand = `ctm config server:agents::get ${server}`;
+
+        exec(agentsCommand, (error, stdout, stderr) => {
+            if (error) {
+                message.channel.send(`Error getting agents: ${error.message}`);
+                return;
+            }
+            if (stderr) {
+                message.channel.send(`Error: ${stderr}`);
+                return;
+            }
+
+            const agentsResult = JSON.parse(stdout);
+            const agentsList = agentsResult.agents.map(agent => 
+                `Node ID: ${agent.nodeid}, Status: ${agent.status}, Version: ${agent.version}, OS: ${agent.operatingSystem}`
+            ).join('\n');
+
+            message.channel.send(`Agents on server ${server}:\n${agentsList}`);
+        });
+    }
 });
 
 // Log in to Discord with your client's token
