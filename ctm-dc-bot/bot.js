@@ -1,4 +1,5 @@
 const { Client, GatewayIntentBits } = require('discord.js');
+const { exec } = require('child_process');
 
 // Load environment variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
@@ -10,125 +11,81 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 
 client.once('ready', () => {
     console.log(`Bot connected as ${client.user.tag}`);
-});
 
-// Command to get servers
-client.on('messageCreate', async (message) => {
-    if (message.content.startsWith('!get_servers')) {
-        try {
-            const response = await fetch(`${CONTROL_M_ENDPOINT}/config/servers`, {
-                method: 'GET',
-                headers: {
-                    'x-api-key': CONTROL_M_API_KEY,
-                },
-            });
-
-            if (response.ok) {
-                const servers = await response.json();
-                const serverList = servers.map(server => 
-                    `Name: ${server.name}, Host: ${server.host}, State: ${server.state}, Version: ${server.version}, OS: ${server.OSType}`
-                ).join('\n');
-
-                message.channel.send(`Control-M Servers:\n${serverList}`);
-            } else {
-                message.channel.send(`Failed to retrieve servers. Status code: ${response.status}`);
-            }
-        } catch (error) {
-            message.channel.send(`An error occurred: ${error.message}`);
+    // Add the environment using ctm-cli on bot startup
+    exec(`ctm environment add prod ${CONTROL_M_ENDPOINT} ${CONTROL_M_API_KEY}`, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`Error adding environment: ${error.message}`);
+            return;
         }
-    }
+        if (stderr) {
+            console.error(`Standard error: ${stderr}`);
+            return;
+        }
+        console.log(`Environment added successfully: ${stdout}`);
+    });
 });
 
-// Command to run a job
+// Command to run a job using ctm-cli
 client.on('messageCreate', async (message) => {
     if (message.content.startsWith('!run_job')) {
         const args = message.content.split(' ');
         const zipcode = args[1];
         const email = args[2];
 
-        const payload = {
-            ctm: "IN01",
-            folder: "mqn-forecast-flow",
-            jobs: "*",
-            variables: [
-                {
-                    zipcode: zipcode,
-                    email: email,
-                },
-            ],
-        };
+        const runCommand = `ctm run order prod IN01 mqn-forecast-flow -v zipcode=${zipcode} -v email=${email}`;
 
-        try {
-            const response = await fetch(`${CONTROL_M_ENDPOINT}/run/order`, {
-                method: 'POST',
-                headers: {
-                    'x-api-key': CONTROL_M_API_KEY,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(payload),
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-                const { runId, statusURI } = result;
-                message.channel.send(`Job submitted! Run ID: ${runId}. Checking status...`);
-
-                // Check job status
-                const statusResponse = await fetch(statusURI, {
-                    method: 'GET',
-                    headers: {
-                        'x-api-key': CONTROL_M_API_KEY,
-                    },
-                });
-
-                if (statusResponse.ok) {
-                    const statusResult = await statusResponse.json();
-                    const completion = statusResult.completion;
-
-                    if (completion === "Completed") {
-                        const jobName = statusResult.statuses[0].name;
-                        const jobId = statusResult.statuses[0].jobId;
-                        message.channel.send(`Job ${runId} completed successfully!`);
-                        message.channel.send(`Job Name: ${jobName}, Job ID: ${jobId}. Use !get_output ${jobId} to see the output.`);
-                    } else {
-                        message.channel.send(`Job ${runId} is still in progress. Please check again later.`);
-                    }
-                } else {
-                    message.channel.send(`Failed to retrieve job status. Status code: ${statusResponse.status}`);
-                }
-            } else {
-                message.channel.send(`Failed to submit job. Status code: ${response.status}`);
+        exec(runCommand, (error, stdout, stderr) => {
+            if (error) {
+                message.channel.send(`Error running job: ${error.message}`);
+                return;
             }
-        } catch (error) {
-            message.channel.send(`An error occurred: ${error.message}`);
-        }
+            if (stderr) {
+                message.channel.send(`Error: ${stderr}`);
+                return;
+            }
+            const runId = stdout.trim();  // Assuming runId is returned in stdout
+            message.channel.send(`Job submitted successfully! Run ID: ${runId}`);
+
+            // Check the job status
+            exec(`ctm run status prod ${runId}`, (statusError, statusStdout, statusStderr) => {
+                if (statusError) {
+                    message.channel.send(`Error checking status: ${statusError.message}`);
+                    return;
+                }
+                if (statusStderr) {
+                    message.channel.send(`Error: ${statusStderr}`);
+                    return;
+                }
+
+                const statusResult = statusStdout.trim();
+                message.channel.send(`Job Status: ${statusResult}`);
+            });
+        });
     }
 });
 
-// Command to get job output
+// Command to get job output using ctm-cli
 client.on('messageCreate', async (message) => {
     if (message.content.startsWith('!get_output')) {
         const args = message.content.split(' ');
         const jobId = args[1];
         const runNo = args[2] || 1;
 
-        try {
-            const response = await fetch(`${CONTROL_M_ENDPOINT}/run/job/${jobId}/output/?runNo=${runNo}`, {
-                method: 'GET',
-                headers: {
-                    'x-api-key': CONTROL_M_API_KEY,
-                },
-            });
+        const outputCommand = `ctm run job prod ${jobId} output --runNo ${runNo}`;
 
-            if (response.ok) {
-                const output = await response.text();
-                message.channel.send(`Job Output:\n${output}`);
-            } else {
-                message.channel.send(`Failed to retrieve job output. Status code: ${response.status}`);
+        exec(outputCommand, (error, stdout, stderr) => {
+            if (error) {
+                message.channel.send(`Error getting output: ${error.message}`);
+                return;
             }
-        } catch (error) {
-            message.channel.send(`An error occurred: ${error.message}`);
-        }
+            if (stderr) {
+                message.channel.send(`Error: ${stderr}`);
+                return;
+            }
+
+            message.channel.send(`Job Output:\n${stdout}`);
+        });
     }
 });
 
