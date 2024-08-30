@@ -1,9 +1,10 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 // Load environment variables
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CONTROL_M_API_KEY = process.env.CONTROL_M_API_KEY;
 const CONTROL_M_ENDPOINT = process.env.CONTROL_M_ENDPOINT;
 
 // Create a new client instance
@@ -13,7 +14,7 @@ client.once('ready', () => {
     console.log(`Bot connected as ${client.user.tag}`);
 
     // Add the environment using ctm-cli on bot startup
-    exec(`ctm environment add prod ${CONTROL_M_ENDPOINT} ${CONTROL_M_API_KEY}`, (error, stdout, stderr) => {
+    exec(`ctm environment add prod ${CONTROL_M_ENDPOINT} ${process.env.CONTROL_M_API_KEY}`, (error, stdout, stderr) => {
         if (error) {
             console.error(`Error adding environment: ${error.message}`);
             return;
@@ -26,14 +27,24 @@ client.once('ready', () => {
     });
 });
 
-// Command to run a job using ctm-cli
+// Command to run a job using ctm-cli with a JSON config
 client.on('messageCreate', async (message) => {
     if (message.content.startsWith('!run_job')) {
         const args = message.content.split(' ');
         const zipcode = args[1];
         const email = args[2];
 
-        const runCommand = `ctm run order prod IN01 mqn-forecast-flow -v zipcode=${zipcode} -v email=${email}`;
+        // Create the JSON config file
+        const configPath = path.join(__dirname, 'config.json');
+        const configContent = {
+            variables: [
+                { zipcode: zipcode },
+                { email: email }
+            ]
+        };
+        fs.writeFileSync(configPath, JSON.stringify(configContent, null, 2));
+
+        const runCommand = `ctm run order IN01 mqn-forecast-flow -f ${configPath}`;
 
         exec(runCommand, (error, stdout, stderr) => {
             if (error) {
@@ -44,11 +55,12 @@ client.on('messageCreate', async (message) => {
                 message.channel.send(`Error: ${stderr}`);
                 return;
             }
-            const runId = stdout.trim();  // Assuming runId is returned in stdout
+            const result = JSON.parse(stdout);
+            const runId = result.runId;
             message.channel.send(`Job submitted successfully! Run ID: ${runId}`);
 
             // Check the job status
-            exec(`ctm run status prod ${runId}`, (statusError, statusStdout, statusStderr) => {
+            exec(`ctm run status ${runId}`, (statusError, statusStdout, statusStderr) => {
                 if (statusError) {
                     message.channel.send(`Error checking status: ${statusError.message}`);
                     return;
@@ -58,33 +70,45 @@ client.on('messageCreate', async (message) => {
                     return;
                 }
 
-                const statusResult = statusStdout.trim();
-                message.channel.send(`Job Status: ${statusResult}`);
+                const statusResult = JSON.parse(statusStdout);
+                if (statusResult.completion === 'Completed') {
+                    const jobList = statusResult.statuses.map((job, index) => {
+                        return `${index + 1}. Name: ${job.name}, Job ID: ${job.jobId}`;
+                    }).join('\n');
+
+                    message.channel.send(`Job completed successfully! Here are the jobs:\n${jobList}\nReply with the job number to get the output.`);
+
+                    const filter = m => !isNaN(m.content) && parseInt(m.content) > 0 && parseInt(m.content) <= statusResult.statuses.length;
+                    const collector = message.channel.createMessageCollector({ filter, max: 1, time: 30000 });
+
+                    collector.on('collect', m => {
+                        const jobIndex = parseInt(m.content) - 1;
+                        const selectedJob = statusResult.statuses[jobIndex];
+                        const outputCommand = `ctm run job:output::get ${selectedJob.jobId} 0`;
+
+                        exec(outputCommand, (outputError, outputStdout, outputStderr) => {
+                            if (outputError) {
+                                message.channel.send(`Error getting output: ${outputError.message}`);
+                                return;
+                            }
+                            if (outputStderr) {
+                                message.channel.send(`Error: ${outputStderr}`);
+                                return;
+                            }
+
+                            message.channel.send(`Job Output:\n${outputStdout}`);
+                        });
+                    });
+
+                    collector.on('end', collected => {
+                        if (collected.size === 0) {
+                            message.channel.send('No job selected within the time limit.');
+                        }
+                    });
+                } else {
+                    message.channel.send(`Job is still in progress or failed. Status: ${statusResult.completion}`);
+                }
             });
-        });
-    }
-});
-
-// Command to get job output using ctm-cli
-client.on('messageCreate', async (message) => {
-    if (message.content.startsWith('!get_output')) {
-        const args = message.content.split(' ');
-        const jobId = args[1];
-        const runNo = args[2] || 1;
-
-        const outputCommand = `ctm run job prod ${jobId} output --runNo ${runNo}`;
-
-        exec(outputCommand, (error, stdout, stderr) => {
-            if (error) {
-                message.channel.send(`Error getting output: ${error.message}`);
-                return;
-            }
-            if (stderr) {
-                message.channel.send(`Error: ${stderr}`);
-                return;
-            }
-
-            message.channel.send(`Job Output:\n${stdout}`);
         });
     }
 });
